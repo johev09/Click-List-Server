@@ -1,19 +1,22 @@
 var WebSocketServer = require('websocket').server;
 var http = require('http');
+var mysql = require('mysql');
 
-//var host = 'localhost',
-//    user = 'root',
-//    password = '',
-//    database = 'click_list';
 var host = 'localhost',
     user = 'root',
-    password = 'monty',
+    password = '',
     database = 'click_list';
-//var SERVER_IP = "127.0.0.1",
-var SERVER_IP = '172.31.9.244',
+//var host = 'localhost',
+//    user = 'root',
+//    password = 'monty',
+//    database = 'click_list';
+var SERVER_IP = "127.0.0.1",
+    //var SERVER_IP = '172.31.9.244',
     SERVER_PORT = 5001;
 
-var mysql = require('mysql');
+//keeps email => userfunc() of current online users
+var online = {};
+
 var pool = mysql.createPool({
     connectionLimit: 100, //important
     host: host,
@@ -73,6 +76,7 @@ wsServer = new WebSocketServer({
     // to accept it. 
     autoAcceptConnections: false
 });
+wsServer.on('request', newUser);
 
 function originIsAllowed(origin) {
     // put logic here to detect whether the specified origin is allowed.
@@ -85,8 +89,7 @@ function originIsAllowed(origin) {
     return false;
 }
 
-var usersByEmail = {};
-wsServer.on('request', function (request) {
+function newUser(request) {
     if (!originIsAllowed(request.origin)) {
         // Make sure we only accept requests from an allowed origin 
         request.reject();
@@ -97,8 +100,8 @@ wsServer.on('request', function (request) {
     try {
         //accepting connection with echo-protocol
         var connection = request.accept('echo-protocol', request.origin);
-        
-        var self = this,    //pointer to current user
+
+        var self = this, //pointer to current user
             useremail,
             deleted = false,
             insertUserSQL = "INSERT INTO users(email) VALUES(?) ON DUPLICATE KEY UPDATE email=?",
@@ -125,9 +128,9 @@ wsServer.on('request', function (request) {
                     case "email":
                         {
                             useremail = json.data
-                            usersByEmail[useremail] = self
+                            online[useremail] = self
                                 //starting thread to check for new data and send data to client
-                            pollThread()
+                            self.pollThread()
                                 //register user if not yet registered
                             poolQuery({
                                 sql: insertUserSQL,
@@ -149,10 +152,10 @@ wsServer.on('request', function (request) {
                                 values: [lid]
                             }, function (err, rows, fields) {
                                 if (!err) {
-                                    if (sender in usersByEmail)
-                                        usersByEmail[sender].clientPush = true
-                                    if (receiver in usersByEmail)
-                                        usersByEmail[receiver].clientPush = true
+                                    if (sender in online)
+                                        online[sender].clientPush = true
+                                    if (receiver in online)
+                                        online[receiver].clientPush = true
                                 }
                             })
                         }
@@ -210,8 +213,8 @@ wsServer.on('request', function (request) {
                                     response["action"] = "deleted"
                                     response["lid"] = lid
                                     console.log("link deleted: " + lid)
-                                    if (sender in usersByEmail) {
-                                        usersByEmail[sender].clientPush = true
+                                    if (sender in online) {
+                                        online[sender].clientPush = true
                                     }
                                 }
                                 self.send(response)
@@ -233,10 +236,11 @@ wsServer.on('request', function (request) {
         this.send = function (response) {
             connection.sendUTF(JSON.stringify(response))
         }
-
-        function pollThread() {
+        this.pollThread = function pollThread() {
             if (closed) {
                 console.log("CLIENT DISCONNECTED: " + useremail)
+                //remove from online list
+                delete online[useremail]
                 return
             }
 
@@ -260,8 +264,8 @@ wsServer.on('request', function (request) {
                         //                                sql: updateReceivedSQL,
                         //                                values: [row.lid]
                         //                            }, function (err, rows, fields) {
-                        //                                if (!err && sender in usersByEmail)
-                        //                                    usersByEmail[sender].clientPush = true
+                        //                                if (!err && sender in online)
+                        //                                    online[sender].clientPush = true
                         //                            })
                         //                        }
                         //
@@ -299,4 +303,4 @@ wsServer.on('request', function (request) {
     } catch (err) {
         console.error(err)
     }
-});
+}
