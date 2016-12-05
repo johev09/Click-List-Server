@@ -2,16 +2,16 @@ var WebSocketServer = require('websocket').server;
 var http = require('http');
 var mysql = require('mysql');
 
-var host = 'localhost',
-    user = 'root',
-    password = '',
-    database = 'click_list';
 //var host = 'localhost',
 //    user = 'root',
-//    password = 'monty',
+//    password = '',
 //    database = 'click_list';
-var SERVER_IP = "127.0.0.1",
-    //var SERVER_IP = '172.31.9.244',
+var host = 'localhost',
+    user = 'root',
+    password = 'monty',
+    database = 'click_list';
+//var SERVER_IP = "127.0.0.1",
+var SERVER_IP = '172.31.9.244',
     SERVER_PORT = 5001;
 
 //keeps email => userfunc() of current online users
@@ -130,6 +130,7 @@ function newUser(request) {
                             useremail = json.data
                             online[useremail] = self
                                 //starting thread to check for new data and send data to client
+                            self.clientPush = true
                             self.pollThread()
                                 //register user if not yet registered
                             poolQuery({
@@ -183,9 +184,14 @@ function newUser(request) {
                                 } else {
                                     response["success"] = true
                                     response["message"] = "Link sent to " + sender
-                                    response["action"] = "received"
+                                    response["action"] = "sent"
                                     response["lid"] = lid
                                     console.log("link sent to " + sender)
+
+                                    if (sender in online)
+                                        online[sender].clientPush = true
+                                    if (receiver in online)
+                                        online[receiver].clientPush = true
                                 }
                                 self.send(response)
                             })
@@ -196,11 +202,11 @@ function newUser(request) {
                         {
                             var data = json.data,
                                 lid = data.lid,
-                                email = data.email,
+                                receiver = data.email,
                                 sender = data.sender
                             poolQuery({
                                 sql: deleteSQL,
-                                values: [email, lid]
+                                values: [receiver, lid]
                             }, function (err, rows, fields) {
                                 var response = {};
                                 if (err) {
@@ -215,6 +221,9 @@ function newUser(request) {
                                     console.log("link deleted: " + lid)
                                     if (sender in online) {
                                         online[sender].clientPush = true
+                                    }
+                                    if (receiver in online) {
+                                        online[receiver].clientPush = true
                                     }
                                 }
                                 self.send(response)
@@ -239,7 +248,7 @@ function newUser(request) {
         this.pollThread = function pollThread() {
             if (closed) {
                 console.log("CLIENT DISCONNECTED: " + useremail)
-                //remove from online list
+                    //remove from online list
                 delete online[useremail]
                 return
             }
@@ -275,18 +284,29 @@ function newUser(request) {
                         //                    })
                         //                    lids = nlids
                         //if (nrows || deleted || self.clientPush) {
-                        if (self.clientPush) {
-                            deleted = false
-                            self.clientPush = false
 
-                            console.log("send", useremail, nrows);
-                            self.send({
-                                success: true,
-                                message: "YAY! New Links",
-                                action: "data",
-                                data: rows
-                            })
-                        }
+                        // senders whose links were received now should get the notification
+                        rows.forEach(function (row) {
+                            if (row.receiver == useremail && !row.received) {
+                                var sender = row.sender
+                                poolQuery({
+                                    sql: updateReceivedSQL,
+                                    values: [row.lid]
+                                }, function (err, rows, fields) {
+                                    if (!err && sender in online)
+                                        online[sender].clientPush = true
+                                })
+                            }
+                        })
+
+                        console.log("RECEIVED", useremail, rows.length);
+                        self.send({
+                            success: true,
+                            message: "YAY! New Links",
+                            action: "data",
+                            data: rows
+                        })
+
                     } else {
                         //console.log("db err", err);
                         self.send({
@@ -298,7 +318,6 @@ function newUser(request) {
             }
 
             setTimeout(pollThread, pollTimeout)
-
         }
     } catch (err) {
         console.error(err)
