@@ -84,7 +84,7 @@ wsServer.on('request', function (request) {
         return;
     }
 
-    client(request)
+    c = new client(request)
 });
 
 function originIsAllowed(origin) {
@@ -110,6 +110,7 @@ function client(request) {
         lids = new Set(),
         pollTimeout = 2000
 
+    var self = this
     this.closed = false
     this.useremail = undefined
     this.clientPush = true // forces data push to client  
@@ -126,7 +127,7 @@ function client(request) {
 
                         //starting thread to check for new data and send data to client
                         this.clientPush = true
-                        this.pollThread();
+                        this.pollThread.call(this);
                         //register user if not yet registered
                         poolQuery({
                             sql: insertUserSQL,
@@ -188,7 +189,7 @@ function client(request) {
                                 if (receiver in online)
                                     online[receiver].clientPush = true
                             }
-                            this.send(response)
+                            self.send.call(self, response)
                         })
                     }
                     break
@@ -221,8 +222,7 @@ function client(request) {
                                     online[receiver].clientPush = true
                                 }
                             }
-                            this.send(response)
-                            deleted = true
+                            self.send.call(self, response)
                         })
                     }
                 }
@@ -234,14 +234,14 @@ function client(request) {
     }
     this.onclose = function (reasonCode, description) {
         this.closed = true
-        console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
+        console.log((new Date()) + ' Peer ' + this.connection.remoteAddress + ' disconnected.');
     }
     this.send = function (response) {
-        connection.sendUTF(JSON.stringify(response))
+        this.connection.sendUTF(JSON.stringify(response))
     }
     this.pollThread = function () {
-        console.log(this.useremail, "thread running...")
-        if (closed) {
+        //console.log(this.useremail, "thread running...")
+        if (this.closed) {
             console.log("CLIENT DISCONNECTED: " + this.useremail)
                 //remove from online list
             delete online[this.useremail]
@@ -249,7 +249,6 @@ function client(request) {
         }
 
         if (this.clientPush) {
-            deleted = false
             this.clientPush = false
 
             //console.log("query", getLinksQuery)
@@ -282,7 +281,7 @@ function client(request) {
 
                     // senders whose links were received now should get the notification
                     rows.forEach(function (row) {
-                        if (row.receiver == this.useremail && !row.received) {
+                        if (row.receiver == self.useremail && !row.received) {
                             var sender = row.sender
                             poolQuery({
                                 sql: updateReceivedSQL,
@@ -294,8 +293,8 @@ function client(request) {
                         }
                     })
 
-                    console.log("RECEIVED", this.useremail, rows.length);
-                    this.send({
+                    console.log("RECEIVED", self.useremail, rows.length);
+                    self.send.call(self, {
                         success: true,
                         message: "YAY! New Links",
                         action: "data",
@@ -304,19 +303,19 @@ function client(request) {
 
                 } else {
                     //console.log("db err", err);
-                    this.send({
+                    self.send.call(self, {
                         success: false,
                         message: err
                     })
                 }
             })
         }
-
+        
         setTimeout(this.pollThread.bind(this), pollTimeout)
     }
 
     this.connection = request.accept('echo-protocol', request.origin);
     console.log((new Date()) + ' Connection accepted.');
-    connection.on('message', this.onmessage.bind(this));
-    connection.on('close', this.onclose.bind(this));
+    this.connection.on('message', this.onmessage.bind(this));
+    this.connection.on('close', this.onclose.bind(this));
 }
