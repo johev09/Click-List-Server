@@ -1,28 +1,70 @@
+var config = require('./config');
+
 var WebSocketServer = require('websocket').server;
 var http = require('http');
 var mysql = require('mysql');
 
-//var host = 'localhost',
-//    user = 'root',
-//    password = '',
-//    database = 'click_list';
-var host = 'localhost',
-    user = 'root',
-    password = 'monty',
-    database = 'click_list';
-//var SERVER_IP = "127.0.0.1",
-var SERVER_IP = '172.31.9.244',
-    SERVER_PORT = 5001;
+var nodemailer = require('nodemailer');
+var fs = require('fs');
+
+var mailer = {
+    mailto: function (email, fromMail) {
+        if (!this.ready)
+            return console.log("Mailed not ready", email, fromMail)
+
+        // setup e-mail data with unicode symbols
+        var text = "You have unread links from " + fromMail + "\n\n" +
+            "Install Click List Chrome Extension to view your links. Link given below" + "\n\n" +
+            "https://chrome.google.com/webstore/detail/click-list/alhkmhmifgefbkkooliaapebilcjbddo";
+
+        //        var html = "<p>You have <b>unread links</b> from <i>" + fromMail + "</i><br><br>" +
+        //            "You can install Click List Chrome Extension to view your links" + "<br><br>" +
+        //            "<a href='https://chrome.google.com/webstore/detail/click-list/alhkmhmifgefbkkooliaapebilcjbddo?utm_source=gmail'>INSTALL</a>";
+
+        var html = this.html
+        html = html.replace(config.mail.htmlFromRegex, fromMail);
+
+        var mailOptions = {
+            from: config.mail.name + " <" + config.mail.email + ">", // sender address 
+            to: email, // list of receivers 
+            subject: config.mail.subject, // Subject line 
+            text: text, // plaintext body 
+            html: html // html body 
+        };
+
+        // send mail with defined transport object 
+        this.transporter.sendMail(mailOptions, function (error, info) {
+            if (error) {
+                return console.log(error);
+            }
+            console.log("Mail sent to: " + email + ", from: " + fromMail);
+            console.log('Message sent: ' + info.response);
+        });
+    },
+    init: function () {
+        this.ready = false;
+        this.transporter = nodemailer.createTransport(config.mail.hostURL);
+        fs.readFile(config.mail.htmlFile, function read(err, data) {
+            if (err) {
+                return console.log(err);
+            }
+
+            this.html = data.toString()
+            this.ready = true;
+        }.bind(this))
+    }
+}
+mailer.init.call(mailer);
 
 //keeps email => userfunc() of current online users
 var online = {};
 
 var pool = mysql.createPool({
     connectionLimit: 100, //important
-    host: host,
-    user: user,
-    password: password,
-    database: database,
+    host: config.db.host,
+    user: config.db.user,
+    password: config.db.password,
+    database: config.db.database,
     debug: false
 });
 
@@ -63,8 +105,8 @@ var server = http.createServer(function (request, response) {
     response.writeHead(404);
     response.end();
 });
-server.listen(SERVER_PORT, SERVER_IP, function () {
-    console.log((new Date()) + ' Server is listening on port ' + SERVER_PORT);
+server.listen(config.server.port, config.server.host, function () {
+    console.log((new Date()) + ' Server is listening on ' + config.server.host + ":" + config.server.port);
 });
 
 wsServer = new WebSocketServer({
@@ -98,18 +140,30 @@ function originIsAllowed(origin) {
     return false;
 }
 
-function client(request) {
-    var insertUserSQL = "INSERT INTO users(email) VALUES(?) ON DUPLICATE KEY UPDATE email=?",
-        insertSQL = "INSERT INTO links(sender,receiver,title,link,favicon) VALUES(?,?,?,?,?)",
-        deleteSQL = "DELETE FROM links WHERE receiver=? AND lid=?",
-        updateOpenedSQL = "UPDATE links SET opened=1 WHERE lid=?",
-        updateReceivedSQL = "UPDATE links SET received=1 WHERE lid=?",
-        //getLinksQuery = 'SELECT lid,sender,link,title,favicon from links WHERE receiver=? ORDER BY timestamp DESC',
-        getLinksQuery = 'SELECT lid,sender,receiver,link,title,favicon,received,opened from links WHERE sender = ? OR receiver=? ORDER BY timestamp DESC',
-        count = 0,
-        lids = new Set(),
-        pollTimeout = 2000
+function userExists(receiver, sender) {
+    poolQuery({
+        sql: "SELECT email from users WHERE email = ?",
+        values: [receiver]
+    }, function (err, rows, fields) {
+        if (err || rows.length)
+            return;
 
+        mailer.mailto.call(mailer, receiver, sender);
+    });
+}
+
+var insertUserSQL = "INSERT INTO users(email) VALUES(?) ON DUPLICATE KEY UPDATE email=?",
+    insertSQL = "INSERT INTO links(sender,receiver,title,link,favicon) VALUES(?,?,?,?,?)",
+    deleteSQL = "DELETE FROM links WHERE receiver=? AND lid=?",
+    updateOpenedSQL = "UPDATE links SET opened=1 WHERE lid=?",
+    updateReceivedSQL = "UPDATE links SET received=1 WHERE lid=?",
+    //getLinksQuery = 'SELECT lid,sender,link,title,favicon from links WHERE receiver=? ORDER BY timestamp DESC',
+    getLinksQuery = 'SELECT lid,sender,receiver,link,title,favicon,received,opened from links WHERE sender = ? OR receiver=? ORDER BY timestamp DESC',
+    count = 0,
+    lids = new Set(),
+    pollTimeout = 2000
+
+function client(request) {
     var self = this
     this.closed = false
     this.useremail = undefined
@@ -191,6 +245,8 @@ function client(request) {
                             }
                             self.send.call(self, response)
                         })
+
+                        setTimeout(userExists.bind(this, receiver, sender));
                     }
                     break
 
@@ -233,8 +289,11 @@ function client(request) {
         }
     }
     this.onclose = function (reasonCode, description) {
+        //remove from online list
+        delete online[this.useremail]
         this.closed = true
         console.log((new Date()) + ' Peer ' + this.connection.remoteAddress + ' disconnected.');
+        console.log("CLIENT DISCONNECTED: " + this.useremail)
     }
     this.send = function (response) {
         this.connection.sendUTF(JSON.stringify(response))
@@ -242,9 +301,7 @@ function client(request) {
     this.pollThread = function () {
         //console.log(this.useremail, "thread running...")
         if (this.closed) {
-            console.log("CLIENT DISCONNECTED: " + this.useremail)
-                //remove from online list
-            delete online[this.useremail]
+            console.log("CLIENT THREAD CLOSED: " + this.useremail)
             return
         }
 
@@ -310,7 +367,7 @@ function client(request) {
                 }
             })
         }
-        
+
         setTimeout(this.pollThread.bind(this), pollTimeout)
     }
 
